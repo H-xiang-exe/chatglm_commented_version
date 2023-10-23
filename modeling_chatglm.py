@@ -202,6 +202,7 @@ class RotaryEmbedding(torch.nn.Module):
             self.max_seq_len_cached = None if self.learnable else seq_len
             t = torch.arange(seq_len, device=x.device, dtype=self.inv_freq.dtype) # (0,1, ..., 73)
             freqs = torch.einsum('i,j->ij', t, self.inv_freq) # shape (74, 32)
+            print(f'freqs: {freqs[2, 0]}')
             # Different from paper, but it uses a different permutation in order to obtain the same calculation
             emb = torch.cat((freqs, freqs), dim=-1).to(x.device) # (74, 64)
             if self.precision == torch.bfloat16:
@@ -209,6 +210,7 @@ class RotaryEmbedding(torch.nn.Module):
 
             # [sx, 1 (b * np), hn]
             cos_cached = emb.cos()[:, None, :] # (74, 1, 64)
+            print(f'cos: {cos_cached[2, 0, 0]}, {cos_cached[2,0,32]}')
             sin_cached = emb.sin()[:, None, :] # (74, 1, 64)
             if self.precision == torch.bfloat16:
                 cos_cached = cos_cached.bfloat16()
@@ -237,9 +239,14 @@ def apply_rotary_pos_emb_index(q, k, cos, sin, position_id):
     # pid: [[74]] cos: shape-(74, 1, 64)
     # ---> cos: (1, 1, 1, 64)
     # 取第73个
+    print(f'pid: {position_id}')
     cos, sin = F.embedding(position_id, cos.squeeze(1)).unsqueeze(2), \
         F.embedding(position_id, sin.squeeze(1)).unsqueeze(2)
+    print(f'cos: {cos[0][0][0][0]}') # (64,)
+    print(f'q: {q.shape}')
+    print(f'q: {q[0][0][0][0]}, {q[0][0][0][32]}')
     q, k = (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
+    print(f'q: {q[0][0][0][0]}')
     return q, k
 
 
@@ -770,7 +777,7 @@ class ChatGLMPreTrainedModel(PreTrainedModel):
             # print(f'block_pids: {block_position_ids}') # [[0,0,0,1]]
             block_position_ids = torch.stack(block_position_ids, dim=0)
             position_ids = torch.stack((position_ids, block_position_ids), dim=1) # shape: (batch_size, 2, seq_length)
-            print(f'position_ids: {position_ids}') # [[[0,1,2,2],[0,0,0,1]],]
+            # print(f'position_ids: {position_ids}') # [[[0,1,2,2],[0,0,0,1]],]
         else:
             position_ids = torch.arange(seq_length, dtype=torch.long, device=device).unsqueeze(0).repeat(batch_size, 1)
             for i, context_length in enumerate(context_lengths):
@@ -1149,12 +1156,14 @@ class ChatGLMForConditionalGeneration(ChatGLMPreTrainedModel):
         # update past_key_values
         model_kwargs["past_key_values"] = self._extract_past_from_model_output(
             outputs, standardize_cache_format=standardize_cache_format
-        )
+        ) # (28, 2, seq_length, nheads, dhead)
+        # print(f'past_key_values: {model_kwargs["past_key_values"][0][0][0].shape}')
 
         # update attention mask
         if "attention_mask" in model_kwargs:
             attention_mask = model_kwargs["attention_mask"]
-            if attention_mask is not None and attention_mask.dtype == torch.bool:
+            if attention_mask is not None and attention_mask.dtype == torch.bool: # False
+                # print("==============================")
                 attention_mask = torch.cat(
                     [attention_mask, attention_mask.new_ones((*attention_mask.shape[:3], 1))], dim=3)
                 new_attention_mask = attention_mask[:, :, -1:].clone()
@@ -1164,13 +1173,15 @@ class ChatGLMForConditionalGeneration(ChatGLMPreTrainedModel):
                 )
 
         # update position ids
-        if "position_ids" in model_kwargs:
+        if "position_ids" in model_kwargs: # False
             position_ids = model_kwargs["position_ids"]
+            # print(f'pids: {position_ids}')
             new_position_id = position_ids[..., -1:].clone()
             new_position_id[:, 1, :] += 1
             model_kwargs["position_ids"] = torch.cat(
                 [position_ids, new_position_id], dim=-1
             )
+            # print(f'new_pids: {model_kwargs["position_ids"]}')
 
         return model_kwargs
 
@@ -1196,7 +1207,7 @@ class ChatGLMForConditionalGeneration(ChatGLMPreTrainedModel):
         # only last token for input_ids if past is not None
         if past is not None or past_key_values is not None:
             last_token = input_ids[:, -1].unsqueeze(-1)
-            if attention_mask is not None and attention_mask.dtype == torch.bool:
+            if attention_mask is not None and attention_mask.dtype == torch.bool: # False
                 attention_mask = attention_mask[:, :, -1:]
             else:
                 attention_mask = None
